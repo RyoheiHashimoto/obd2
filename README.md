@@ -169,7 +169,8 @@ dashboard ([pi-obd-meter](https://github.com/RyoheiHashimoto/pi-obd-meter))
 that polls the ECU itself; the client recognizes the answers to the
 dashboard's requests and ignores them.
 
-Reports from other vehicles are welcome.
+Reports from other vehicles are welcome:
+[open a vehicle report](https://github.com/RyoheiHashimoto/obd2/issues/new?template=vehicle-report.yml).
 
 ## Not yet supported
 

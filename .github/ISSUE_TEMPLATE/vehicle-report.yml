@@ -1,0 +1,55 @@
+name: Vehicle report
+description: Tell how obd2 works on your vehicle
+title: "Vehicle report: "
+labels: ["vehicle report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying obd2 on your vehicle. Reports fill the "Tested vehicles" table in the README.
+        Please do not paste your VIN.
+  - type: input
+    id: vehicle
+    attributes:
+      label: Vehicle
+      description: Make, model, year and market
+      placeholder: Mazda Demio (DY), 2005, Japan
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - SocketCAN
+        - ELM327 over USB
+        - ELM327 over Bluetooth
+        - ELM327 over Wi-Fi
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Adapter
+      description: The CAN interface, or the ELM327 model and the version it reports
+      placeholder: MCP2515 HAT, OBDLink MX+, "ELM327 v1.5" clone
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What worked
+      options:
+        - label: "`obd2 info`: the protocol and the supported PIDs"
+        - label: "`obd2 read`: live data"
+        - label: "`obd2 dtc`: trouble codes"
+        - label: "`obd2 vin`"
+  - type: textarea
+    id: info
+    attributes:
+      label: Output of obd2 info
+      render: text
+  - type: textarea
+    id: problems
+    attributes:
+      label: Problems
+      description: Errors, missing or wrong values, and the command that showed them
