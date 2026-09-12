@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.22", stable]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  # Runs the SocketCAN code against a real kernel CAN stack (vcan), and
+  # checks the ISO-TP implementation against the kernel's can-isotp module.
+  socketcan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Set up vcan0 and can-isotp
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y can-utils "linux-modules-extra-$(uname -r)"
+          sudo modprobe vcan
+          sudo modprobe can-isotp
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set up vcan0
+      - run: go test -race -tags vcan -v ./socketcan/
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
