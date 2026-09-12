@@ -20,7 +20,8 @@ type Client struct {
 	t Transport
 
 	mu    sync.Mutex
-	proto Protocol // learned from the first response
+	proto Protocol   // learned from the first response
+	batch batchState // whether the transport handles multi-PID requests
 }
 
 // NewClient returns a Client that sends its requests through t.
@@ -86,7 +87,10 @@ func positive(rs []Response, sid byte) ([]Response, error) {
 // Query fails with ErrNoResponse only if no ECU answered at all.
 //
 // On CAN, up to six PIDs whose sizes this package knows are combined into
-// one request. The other protocols allow one PID per request.
+// one request. The other protocols allow one PID per request. Many ELM327
+// clones answer only the first PID of a combined request; the client
+// notices this on its first combined request and asks for one PID at a
+// time from then on.
 func (c *Client) Query(ctx context.Context, pids ...PID) (Readings, error) {
 	var out Readings
 	answered := false
@@ -95,6 +99,9 @@ func (c *Client) Query(ctx context.Context, pids ...PID) (Readings, error) {
 		batch := rest[:n]
 		rest = rest[n:]
 		rs, err := c.service01(ctx, batch)
+		if len(batch) > 1 && c.batching() == batchUntested {
+			rs, err = c.checkBatching(ctx, batch, rs, err)
+		}
 		if errors.Is(err, ErrNoResponse) {
 			continue
 		}
@@ -119,7 +126,7 @@ func (c *Client) Query(ctx context.Context, pids ...PID) (Readings, error) {
 // batchSize returns how many of the leading PIDs to put in one request. The
 // first request goes out alone, since the protocol is not yet known.
 func (c *Client) batchSize(pids []PID) int {
-	if !c.Protocol().IsCAN() {
+	if !c.Protocol().IsCAN() || c.batching() == batchBroken {
 		return 1
 	}
 	n := 0
@@ -337,4 +344,53 @@ func (c *Client) ReadDataByIdentifier(ctx context.Context, did uint16) ([]byte, 
 		}
 	}
 	return nil, fmt.Errorf("obd2: no response carried DID %04X", did)
+}
+
+// batchState records whether the transport handles multi-PID requests.
+type batchState int
+
+const (
+	batchUntested batchState = iota
+	batchWorks
+	batchBroken
+)
+
+func (c *Client) batching() batchState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.batch
+}
+
+// checkBatching runs after the first multi-PID request. Many ELM327 clones
+// answer only the first PID of such a request, or refuse it. The missing
+// PIDs are asked for one at a time; if one answers alone, or if the request
+// was refused only when combined, the client stops combining PIDs.
+func (c *Client) checkBatching(ctx context.Context, batch []PID, rs Readings, err error) (Readings, error) {
+	var missing []PID
+	for _, p := range batch {
+		if !slices.ContainsFunc(rs, func(r Reading) bool { return r.PID == p }) {
+			missing = append(missing, p)
+		}
+	}
+	broken := err != nil && !errors.Is(err, ErrNoResponse)
+	for _, p := range missing {
+		single, serr := c.service01(ctx, []PID{p})
+		switch {
+		case serr == nil:
+			broken = true
+			rs = append(rs, single...)
+		case !errors.Is(serr, ErrNoResponse):
+			return rs, serr
+		}
+	}
+	c.mu.Lock()
+	c.batch = batchWorks
+	if broken {
+		c.batch = batchBroken
+	}
+	c.mu.Unlock()
+	if len(rs) == 0 {
+		return nil, ErrNoResponse
+	}
+	return rs, nil
 }

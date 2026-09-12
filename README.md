@@ -78,6 +78,12 @@ other protocols if that fails. The search runs on the first request and can
 take several seconds, so give that request a generous context deadline. The
 protocol is not saved in the adapter.
 
+Many ELM327 clones answer only the first PID of a combined request. The
+client notices this on its first combined request and asks for one PID at a
+time from then on. With one such clone (an "ELM327 v1.5" on Bluetooth), a
+Mazda Demio's gear indicator went dark for as long as the adapter was plugged
+in and switched on, so unplug adapters when they are not in use.
+
 ### Trouble codes
 
 ```go
