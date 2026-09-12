@@ -2,6 +2,7 @@ package obd2
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -37,7 +38,8 @@ func (c *Client) Protocol() Protocol {
 
 // Request sends a raw request, a service ID followed by its parameters, and
 // returns every ECU's response ordered by ECU. Negative responses are
-// included; see Response.Err.
+// included; see Response.Err. Responses that cannot answer req are dropped:
+// ECUs send them when another tester shares the bus.
 func (c *Client) Request(ctx context.Context, req []byte) ([]Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -45,8 +47,12 @@ func (c *Client) Request(ctx context.Context, req []byte) ([]Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	rs = slices.DeleteFunc(rs, func(r Response) bool { return !answers(req, r.Data) })
+	if len(rs) == 0 {
+		return nil, ErrNoResponse
+	}
 	slices.SortStableFunc(rs, func(a, b Response) int { return int(a.ECU) - int(b.ECU) })
-	if len(rs) > 0 && rs[0].Protocol != ProtocolUnknown {
+	if rs[0].Protocol != ProtocolUnknown {
 		c.proto = rs[0].Protocol
 	}
 	return rs, nil
@@ -139,20 +145,32 @@ func (c *Client) service01(ctx context.Context, pids []PID) (Readings, error) {
 	if err != nil {
 		return nil, err
 	}
+	// With another tester on the bus, an ECU may answer the same PID twice
+	// within one request, once for each tester. Keep the first answer, and
+	// do not let a malformed answer spoil the others.
+	type key struct {
+		ecu uint32
+		pid PID
+	}
+	seen := map[key]bool{}
 	var out Readings
+	var parseErr error
 	for _, r := range pos {
 		readings, err := parseReadings(r.ECU, r.Data[1:], len(pids) == 1)
 		if err != nil {
-			return nil, err
+			parseErr = cmp.Or(parseErr, err)
+			continue
 		}
 		for _, rd := range readings {
-			if slices.Contains(pids, rd.PID) {
+			k := key{rd.ECU, rd.PID}
+			if slices.Contains(pids, rd.PID) && !seen[k] {
+				seen[k] = true
 				out = append(out, rd)
 			}
 		}
 	}
 	if len(out) == 0 {
-		return nil, ErrNoResponse
+		return nil, cmp.Or(parseErr, ErrNoResponse)
 	}
 	return out, nil
 }
@@ -255,7 +273,8 @@ func (c *Client) ClearDTCs(ctx context.Context) error {
 }
 
 // VIN reads the vehicle identification number (service 09, PID 02) from the
-// first ECU that answers.
+// first ECU that answers. Vehicles built for the Japanese market may return
+// their shorter chassis number (model code and serial) instead.
 func (c *Client) VIN(ctx context.Context) (string, error) {
 	rs, err := c.Request(ctx, []byte{0x09, 0x02})
 	if err != nil {

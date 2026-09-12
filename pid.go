@@ -243,14 +243,15 @@ func (r Reading) Float() (float64, error) {
 	return info.decode(r.Data), nil
 }
 
-// String formats the reading, e.g. "Engine speed: 1726 rpm".
+// String formats the reading, e.g. "Engine speed: 1726 rpm". Values are
+// rounded to two decimal places; Float returns them in full.
 func (r Reading) String() string {
 	info, _ := r.PID.Info()
 	if v, err := r.Float(); err == nil {
 		if info.Unit == "" {
-			return fmt.Sprintf("%v: %g", r.PID, v)
+			return fmt.Sprintf("%v: %s", r.PID, formatValue(v))
 		}
-		return fmt.Sprintf("%v: %g %s", r.PID, v, info.Unit)
+		return fmt.Sprintf("%v: %s %s", r.PID, formatValue(v), info.Unit)
 	}
 	return fmt.Sprintf("%v: % X", r.PID, r.Data)
 }

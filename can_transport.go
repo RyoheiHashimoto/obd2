@@ -200,6 +200,9 @@ func (t *CANTransport) roundTrip(ctx context.Context, req []byte, mode Addressin
 		if msg == nil {
 			continue
 		}
+		if !answers(req, msg) {
+			continue // an answer to another tester's request
+		}
 		if len(msg) >= 3 && msg[0] == 0x7F && msg[2] == nrcResponsePending {
 			s.deadline = time.Now().Add(responsePendingTimeout)
 			continue

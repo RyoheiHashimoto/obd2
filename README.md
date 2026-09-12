@@ -156,10 +156,19 @@ default) to collect every answer. For fast polling, address one ECU with
   [can-isotp](https://github.com/pylessard/python-can-isotp), an independent
   implementation in Python.
 
-This library has not yet been run against a real vehicle. The code it grew
-out of, [pi-obd-meter](https://github.com/RyoheiHashimoto/pi-obd-meter), runs
-in a Mazda Demio (CAN, 11-bit, 500 kbit/s). Reports from other vehicles are
-welcome.
+### Tested vehicles
+
+| Vehicle | Protocol | Adapter | Works |
+|---|---|---|---|
+| Mazda Demio DY (DBA-DY3W, ZJ-VE 1.3 L), Japanese market | CAN 11-bit, 500 kbit/s | SocketCAN (MCP2515) | 28 PIDs, trouble codes, VIN, service 22 |
+
+On the Demio, the VIN request returns the vehicle's 10-character Japanese
+chassis number rather than a 17-character VIN. Its bus also carries a
+dashboard ([pi-obd-meter](https://github.com/RyoheiHashimoto/pi-obd-meter))
+that polls the ECU itself; the client recognizes the answers to the
+dashboard's requests and ignores them.
+
+Reports from other vehicles are welcome.
 
 ## Not yet supported
 
