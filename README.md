@@ -152,8 +152,9 @@ default) to collect every answer. For fast polling, address one ECU with
   sheet, including interleaved answers from two ECUs and the formats of the
   older protocols.
 - In CI, the SocketCAN code runs against the Linux kernel's CAN stack (vcan),
-  and the ISO-TP implementation is checked against the kernel's own
-  (`can-isotp`) in both directions.
+  and the ISO-TP implementation is checked in both directions against
+  [can-isotp](https://github.com/pylessard/python-can-isotp), an independent
+  implementation in Python.
 
 This library has not yet been run against a real vehicle. The code it grew
 out of, [pi-obd-meter](https://github.com/RyoheiHashimoto/pi-obd-meter), runs
