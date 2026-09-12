@@ -2,7 +2,6 @@ package obd2_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -12,16 +11,12 @@ import (
 
 // pidServer answers service 01 requests from a table, as an ECU behind an
 // adapter would. With firstOnly it answers only the first PID of a
-// multi-PID request, as many ELM327 clones do; with rejectMulti it refuses
-// such requests outright.
+// multi-PID request, as many ELM327 clones do.
 type pidServer struct {
-	data        map[obd2.PID][]byte
-	firstOnly   bool
-	rejectMulti bool
-	sent        []string
+	data      map[obd2.PID][]byte
+	firstOnly bool
+	sent      []string
 }
-
-var errRejected = errors.New("adapter answered ?")
 
 func (s *pidServer) RoundTrip(ctx context.Context, req []byte) ([]obd2.Response, error) {
 	s.sent = append(s.sent, fmt.Sprintf("%X", req))
@@ -29,13 +24,8 @@ func (s *pidServer) RoundTrip(ctx context.Context, req []byte) ([]obd2.Response,
 		return nil, obd2.ErrNoResponse
 	}
 	pids := req[1:]
-	if len(pids) > 1 {
-		if s.rejectMulti {
-			return nil, errRejected
-		}
-		if s.firstOnly {
-			pids = pids[:1]
-		}
+	if s.firstOnly {
+		pids = pids[:1]
 	}
 	resp := []byte{0x41}
 	for _, p := range pids {
@@ -49,6 +39,12 @@ func (s *pidServer) RoundTrip(ctx context.Context, req []byte) ([]obd2.Response,
 	return []obd2.Response{{ECU: 0x7E8, Protocol: obd2.ProtocolCAN11, Data: resp}}, nil
 }
 
+// singlePID is a pidServer whose transport cannot combine PIDs, like the
+// elm327 adapter.
+type singlePID struct{ *pidServer }
+
+func (singlePID) CombinesPIDs() bool { return false }
+
 func idleDemio() map[obd2.PID][]byte {
 	return map[obd2.PID][]byte{
 		obd2.EngineRPM:    {0x0B, 0x64},
@@ -57,51 +53,36 @@ func idleDemio() map[obd2.PID][]byte {
 	}
 }
 
-// The ELM327 v1.5 clone once used by pi-obd-meter answered only one PID of
-// a multi-PID request (RyoheiHashimoto/pi-obd-meter#54).
-func TestQueryFallsBackWhenMultiPIDFails(t *testing.T) {
-	for _, s := range []*pidServer{
-		{data: idleDemio(), firstOnly: true},
-		{data: idleDemio(), rejectMulti: true},
-	} {
-		c := obd2.NewClient(s)
-		ctx := ctx(t)
-		if _, err := c.Query(ctx, obd2.EngineRPM); err != nil { // learns the protocol
-			t.Fatal(err)
-		}
-		rs, err := c.Query(ctx, obd2.EngineRPM, obd2.VehicleSpeed, obd2.CoolantTemp)
-		if err != nil || len(rs) != 3 {
-			t.Fatalf("firstOnly=%v rejectMulti=%v: got %v, %v", s.firstOnly, s.rejectMulti, rs, err)
-		}
-		s.sent = nil
-		if _, err := c.Query(ctx, obd2.EngineRPM, obd2.VehicleSpeed); err != nil {
-			t.Fatal(err)
-		}
-		if want := []string{"010C", "010D"}; !slices.Equal(s.sent, want) {
-			t.Errorf("firstOnly=%v rejectMulti=%v: sent %q, want one PID per request %q", s.firstOnly, s.rejectMulti, s.sent, want)
-		}
+// queryAfterLearning makes a first query, which teaches the client the
+// protocol, then records what the second query sends.
+func queryAfterLearning(t *testing.T, c *obd2.Client, s *pidServer, pids ...obd2.PID) (obd2.Readings, []string) {
+	t.Helper()
+	if _, err := c.Query(ctx(t), obd2.EngineRPM); err != nil {
+		t.Fatal(err)
+	}
+	s.sent = nil
+	rs, err := c.Query(ctx(t), pids...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rs, s.sent
+}
+
+func TestQueryCombinesPIDsOnCAN(t *testing.T) {
+	s := &pidServer{data: idleDemio()}
+	rs, sent := queryAfterLearning(t, obd2.NewClient(s), s, obd2.EngineRPM, obd2.VehicleSpeed, obd2.CoolantTemp)
+	if len(rs) != 3 || !slices.Equal(sent, []string{"010C0D05"}) {
+		t.Errorf("got %d readings, sent %q; want 3 in one request", len(rs), sent)
 	}
 }
 
-// An ECU that handles multi-PID requests leaves out the PIDs it lacks. The
-// client checks once that they are really unsupported, then keeps
-// combining PIDs.
-func TestQueryKeepsCombiningWhenMultiPIDWorks(t *testing.T) {
-	s := &pidServer{data: idleDemio()}
-	c := obd2.NewClient(s)
-	ctx := ctx(t)
-	if _, err := c.Query(ctx, obd2.EngineRPM); err != nil {
-		t.Fatal(err)
-	}
-	rs, err := c.Query(ctx, obd2.EngineRPM, obd2.VehicleSpeed, obd2.EngineOilTemp)
-	if err != nil || len(rs) != 2 {
-		t.Fatalf("got %v, %v", rs, err)
-	}
-	s.sent = nil
-	if _, err := c.Query(ctx, obd2.EngineRPM, obd2.EngineOilTemp); err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"010C5C"}; !slices.Equal(s.sent, want) {
-		t.Errorf("sent %q, want %q", s.sent, want)
+// The ELM327 v1.5 clone once used by pi-obd-meter answered only one PID of
+// a multi-PID request (RyoheiHashimoto/pi-obd-meter#54). A transport that
+// says it cannot combine PIDs gets them one at a time, and nothing is lost.
+func TestQueryAsksOneAtATimeWhenTransportCannotCombine(t *testing.T) {
+	s := &pidServer{data: idleDemio(), firstOnly: true}
+	rs, sent := queryAfterLearning(t, obd2.NewClient(singlePID{s}), s, obd2.EngineRPM, obd2.VehicleSpeed, obd2.CoolantTemp)
+	if len(rs) != 3 || !slices.Equal(sent, []string{"010C", "010D", "0105"}) {
+		t.Errorf("got %d readings, sent %q; want 3 readings, one PID per request", len(rs), sent)
 	}
 }

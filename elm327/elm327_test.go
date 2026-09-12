@@ -109,9 +109,8 @@ var canScript = map[string]string{
 	"0120": "NO DATA",
 	"0101": "7E80641018207650000",
 	"010C": "7E804410C1AF8000000",
-	// Two PIDs in one request, as CAN allows.
-	"010C0D": "7E806410C1AF80D3200",
-	"03":     "7E80643020133030000",
+	"010D": "7E803410D3200000000",
+	"03":   "7E80643020133030000",
 	// The VIN of the data sheet: a first frame and two consecutive frames.
 	"0902": "7E81014490201314434\r7E82147503030523535\r7E82242313233343536",
 	// The data sheet's example of two ECUs whose frames interleave.
@@ -147,8 +146,8 @@ func TestCAN(t *testing.T) {
 	if v, _ := rs.Float(obd2.VehicleSpeed); v != 50 {
 		t.Errorf("speed = %v", v)
 	}
-	if !slices.Contains(f.sent(), "010C0D") {
-		t.Errorf("PIDs were not combined on CAN; sent %q", f.sent())
+	if slices.Contains(f.sent(), "010C0D") || !slices.Contains(f.sent(), "010D") {
+		t.Errorf("PIDs should go one per request through an ELM327; sent %q", f.sent())
 	}
 
 	on, n, err := c.MILStatus(ctx)

@@ -18,6 +18,15 @@ type Transport interface {
 	RoundTrip(ctx context.Context, req []byte) ([]Response, error)
 }
 
+// PIDCombiner is implemented by transports that can tell whether a service
+// 01 request may ask for several PIDs at once. On CAN, a Client combines up
+// to six PIDs per request unless CombinesPIDs returns false. The elm327
+// adapter returns false, because many ELM327 clones answer only the first
+// PID of a combined request.
+type PIDCombiner interface {
+	CombinesPIDs() bool
+}
+
 // Response is one ECU's answer to a request.
 type Response struct {
 	// ECU identifies the responder. On CAN it is the identifier the ECU

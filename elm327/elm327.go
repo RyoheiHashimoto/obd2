@@ -65,7 +65,10 @@ type Adapter struct {
 	version string
 }
 
-var _ obd2.Transport = (*Adapter)(nil)
+var (
+	_ obd2.Transport   = (*Adapter)(nil)
+	_ obd2.PIDCombiner = (*Adapter)(nil)
+)
 
 type chunk struct {
 	b   []byte
@@ -156,6 +159,11 @@ func (a *Adapter) expectOK(ctx context.Context, cmd string) error {
 // Version returns the identification the adapter printed on reset, such as
 // "ELM327 v1.5". Clones often claim a version they do not implement.
 func (a *Adapter) Version() string { return a.version }
+
+// CombinesPIDs reports false, so that the client asks for one PID per
+// request: many ELM327 clones answer only the first PID of a combined
+// request (RyoheiHashimoto/pi-obd-meter#54).
+func (a *Adapter) CombinesPIDs() bool { return false }
 
 // Close closes the underlying stream if it is an io.Closer.
 func (a *Adapter) Close() error {
