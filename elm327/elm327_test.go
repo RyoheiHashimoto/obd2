@@ -102,8 +102,8 @@ func testCtx(t *testing.T) context.Context {
 }
 
 var canScript = map[string]string{
-	"ATSP0": "OK",
-	"ATDPN": "A6",
+	"ATTPA6": "OK",
+	"ATDPN":  "A6",
 	// First request: the adapter searches, then answers.
 	"0100": "SEARCHING...\r7E8064100BE3FB81300",
 	"0120": "NO DATA",
@@ -220,7 +220,7 @@ func TestAbandonedCommandIsResynchronized(t *testing.T) {
 
 func TestISO9141(t *testing.T) {
 	f := newFake(map[string]string{
-		"ATSP3": "OK",
+		"ATTP3": "OK",
 		"ATDPN": "3",
 		// The data sheet's example of two ECUs (10 and 18) answering 01 00.
 		"0100": "486B104100BE3EB811FA\r486B18410080108000C0",
@@ -259,5 +259,27 @@ func TestISO9141(t *testing.T) {
 	codes, err := c.StoredDTCs(ctx)
 	if err != nil || !slices.Equal(codes, []obd2.DTC{0x0133}) {
 		t.Errorf("StoredDTCs = %v, %v", codes, err)
+	}
+}
+
+func TestOpenDoesNotSaveTheProtocol(t *testing.T) {
+	f := newFake(canScript)
+	open(t, f, elm327.Options{})
+	for _, c := range f.sent() {
+		if strings.HasPrefix(c, "ATSP") {
+			t.Errorf("sent %q, which saves the protocol in the adapter", c)
+		}
+	}
+	if !slices.Contains(f.sent(), "ATTPA6") {
+		t.Errorf("did not start the search with CAN 11-bit; sent %q", f.sent())
+	}
+}
+
+func TestOpenFallsBackToPlainSearch(t *testing.T) {
+	// An adapter that does not know TP A answers "?".
+	f := newFake(map[string]string{"ATSP0": "OK"})
+	open(t, f, elm327.Options{})
+	if sent := f.sent(); !slices.Contains(sent, "ATTPA6") || !slices.Contains(sent, "ATSP0") {
+		t.Errorf("sent %q", sent)
 	}
 }

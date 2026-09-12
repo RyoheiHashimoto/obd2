@@ -73,9 +73,10 @@ port, err := serial.Open("/dev/ttyUSB0", &serial.Mode{BaudRate: 38400})
 adapter, err := elm327.Open(ctx, port, elm327.Options{})
 ```
 
-With `ProtocolAuto` (the default) the adapter searches for the vehicle's
-protocol on the first request, which can take several seconds; give that
-request a generous context deadline.
+By default the adapter tries CAN (11-bit, 500 kbit/s) first and searches the
+other protocols if that fails. The search runs on the first request and can
+take several seconds, so give that request a generous context deadline. The
+protocol is not saved in the adapter.
 
 ### Trouble codes
 

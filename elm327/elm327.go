@@ -30,8 +30,9 @@ import (
 // Protocol is a protocol number as the AT SP command takes it.
 type Protocol byte
 
-// Protocol numbers. ProtocolAuto makes the adapter search for the vehicle's
-// protocol on the first request, which can take several seconds.
+// Protocol numbers. ProtocolAuto, the default, tries CAN 11-bit at 500 kbit/s
+// first and then searches the other protocols; the search runs on the first
+// request and can take several seconds.
 const (
 	ProtocolAuto      Protocol = '0'
 	ProtocolJ1850PWM  Protocol = '1'
@@ -112,17 +113,44 @@ func Open(ctx context.Context, rw io.ReadWriter, opt Options) (*Adapter, error) 
 		"ATL0", // no line feeds
 		"ATS0", // no spaces
 		"ATH1", // headers on, to tell the ECUs apart
-		"ATSP" + string(rune(p)),
 	} {
-		lines, err := a.command(ctx, cmd)
-		if err != nil {
-			return nil, fmt.Errorf("elm327: %s: %w", cmd, err)
+		if err := a.expectOK(ctx, cmd); err != nil {
+			return nil, err
 		}
-		if !slices.ContainsFunc(lines, func(l string) bool { return strings.HasSuffix(l, "OK") }) {
-			return nil, fmt.Errorf("%w: %s answered %q", ErrAdapter, cmd, lines)
+	}
+
+	// TP selects a protocol without saving it in the adapter's EEPROM,
+	// which SP would do on every connection. The search starts with CAN
+	// 11-bit at 500 kbit/s, which most vehicles use: with an ELM327 v1.5
+	// clone, a Mazda Demio (DY) failed the plain search (AT SP 0) but
+	// answered on that protocol.
+	cmd := "ATTP" + string(rune(p))
+	if p == ProtocolAuto {
+		cmd = "ATTPA6"
+	}
+	if err := a.expectOK(ctx, cmd); err != nil {
+		if p != ProtocolAuto || !errors.Is(err, ErrAdapter) {
+			return nil, err
+		}
+		// An adapter without TP A: fall back to the plain search.
+		if err := a.expectOK(ctx, "ATSP0"); err != nil {
+			return nil, err
 		}
 	}
 	return a, nil
+}
+
+// expectOK sends cmd and fails unless the adapter answers OK. a.mu must be
+// held.
+func (a *Adapter) expectOK(ctx context.Context, cmd string) error {
+	lines, err := a.command(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("elm327: %s: %w", cmd, err)
+	}
+	if !slices.ContainsFunc(lines, func(l string) bool { return strings.HasSuffix(l, "OK") }) {
+		return fmt.Errorf("%w: %s answered %q", ErrAdapter, cmd, lines)
+	}
+	return nil
 }
 
 // Version returns the identification the adapter printed on reset, such as
@@ -158,7 +186,7 @@ func (a *Adapter) readLoop() {
 func (a *Adapter) Command(ctx context.Context, cmd string) ([]string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(cmd)), "ATSP") {
+	if c := strings.ToUpper(strings.ReplaceAll(cmd, " ", "")); strings.HasPrefix(c, "ATSP") || strings.HasPrefix(c, "ATTP") {
 		a.proto = obd2.ProtocolUnknown
 	}
 	return a.command(ctx, cmd)
