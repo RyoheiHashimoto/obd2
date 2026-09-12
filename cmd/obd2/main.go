@@ -4,6 +4,10 @@
 //	obd2 -can can0 info
 //	obd2 -elm 192.168.0.10:35000 dtc
 //	obd2 -elm /dev/ttyUSB0 watch 0C 0D
+//	obd2 -can can0 -json read 0C 0D
+//
+// With -json every command prints JSON for other programs to read; watch
+// prints one JSON object per line.
 //
 // A serial device is opened as a file, so set its speed first, for example
 // "stty -F /dev/ttyUSB0 38400 raw -echo". On macOS use the /dev/cu.* device.
@@ -44,11 +48,18 @@ Commands:
 Flags:
 `
 
+// options holds the settings that apply to every command.
+type options struct {
+	timeout time.Duration // limit for each request
+	json    bool          // print JSON instead of text
+}
+
 func main() {
 	canIf := flag.String("can", "", "SocketCAN interface, such as can0 (Linux)")
 	elmAddr := flag.String("elm", "", "ELM327 adapter: host:port for Wi-Fi, or a serial device path")
 	ecu := flag.String("ecu", "", "address one ECU instead of all: its CAN request ID in hex, such as 7E0")
 	timeout := flag.Duration("timeout", 10*time.Second, "time limit for each request")
+	asJSON := flag.Bool("json", false, "print results as JSON; watch prints one object per line")
 	flag.Usage = func() {
 		_, _ = fmt.Fprint(flag.CommandLine.Output(), usageText)
 		flag.PrintDefaults()
@@ -65,7 +76,8 @@ func main() {
 	if flag.Arg(0) == "sim" {
 		err = simulate(ctx, *canIf)
 	} else {
-		err = run(ctx, *canIf, *elmAddr, *ecu, *timeout, flag.Arg(0), flag.Args()[1:])
+		opt := options{timeout: *timeout, json: *asJSON}
+		err = connectAndRun(ctx, *canIf, *elmAddr, *ecu, opt, flag.Arg(0), flag.Args()[1:])
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "obd2:", err)
@@ -73,52 +85,63 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, canIf, elmAddr, ecu string, timeout time.Duration, cmd string, args []string) error {
+func connectAndRun(ctx context.Context, canIf, elmAddr, ecu string, opt options, cmd string, args []string) error {
+	t, closer, err := connect(ctx, canIf, elmAddr, ecu, opt.timeout)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = closer.Close() }()
+	return run(ctx, obd2.NewClient(t), os.Stdout, opt, cmd, args)
+}
+
+// connect opens the vehicle connection that the flags describe.
+func connect(ctx context.Context, canIf, elmAddr, ecu string, timeout time.Duration) (obd2.Transport, io.Closer, error) {
 	var ecuID uint64
 	if ecu != "" {
 		var err error
 		if ecuID, err = strconv.ParseUint(ecu, 16, 32); err != nil {
-			return fmt.Errorf("bad -ecu %q: %w", ecu, err)
+			return nil, nil, fmt.Errorf("bad -ecu %q: %w", ecu, err)
 		}
 	}
-	var t obd2.Transport
 	switch {
 	case canIf != "" && elmAddr != "":
-		return errors.New("use -can or -elm, not both")
+		return nil, nil, errors.New("use -can or -elm, not both")
 	case canIf != "":
 		bus, err := socketcan.Open(canIf)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
-		defer func() { _ = bus.Close() }()
-		t = obd2.NewCANTransport(bus, obd2.CANOptions{ECU: uint32(ecuID)})
+		return obd2.NewCANTransport(bus, obd2.CANOptions{ECU: uint32(ecuID)}), bus, nil
 	case elmAddr != "":
 		rw, err := dial(elmAddr)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		octx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		a, err := elm327.Open(octx, rw, elm327.Options{})
 		if err != nil {
 			_ = rw.Close()
-			return err
+			return nil, nil, err
 		}
-		defer func() { _ = a.Close() }()
 		if ecu != "" {
 			if _, err := a.Command(octx, "ATSH"+strings.ToUpper(ecu)); err != nil {
-				return err
+				_ = a.Close()
+				return nil, nil, err
 			}
 		}
-		t = a
+		return a, a, nil
 	default:
-		return errors.New("give the vehicle connection with -can or -elm")
+		return nil, nil, errors.New("give the vehicle connection with -can or -elm")
 	}
-	c := obd2.NewClient(t)
+}
 
-	// with runs f with a time limit of its own.
+// run executes one command and writes its result to w.
+func run(ctx context.Context, c *obd2.Client, w io.Writer, opt options, cmd string, args []string) error {
+	out := &output{w: w, json: opt.json}
+	// with runs f under a time limit of its own.
 	with := func(f func(ctx context.Context) error) error {
-		ctx, cancel := context.WithTimeout(ctx, timeout)
+		ctx, cancel := context.WithTimeout(ctx, opt.timeout)
 		defer cancel()
 		return f(ctx)
 	}
@@ -130,11 +153,7 @@ func run(ctx context.Context, canIf, elmAddr, ecu string, timeout time.Duration,
 			if err != nil {
 				return err
 			}
-			fmt.Println("Protocol:", c.Protocol())
-			for _, p := range pids {
-				fmt.Printf("  %02X  %v\n", byte(p), p)
-			}
-			return nil
+			return out.info(c.Protocol(), pids)
 		})
 	case "read", "watch":
 		pids, err := parsePIDs(args)
@@ -153,16 +172,19 @@ func run(ctx context.Context, canIf, elmAddr, ecu string, timeout time.Duration,
 			}
 		}
 		for {
-			if err := with(func(ctx context.Context) error {
+			err := with(func(ctx context.Context) error {
 				rs, err := c.Query(ctx, pids...)
-				for _, r := range rs {
-					fmt.Printf("%-8X %v\n", r.ECU, r)
+				if err != nil {
+					return err
 				}
-				return err
-			}); err != nil || cmd == "read" {
+				return out.readings(rs, time.Now())
+			})
+			if err != nil || cmd == "read" {
 				return err
 			}
-			fmt.Println()
+			if err := out.separator(); err != nil {
+				return err
+			}
 		}
 	case "dtc":
 		return with(func(ctx context.Context) error {
@@ -170,47 +192,48 @@ func run(ctx context.Context, canIf, elmAddr, ecu string, timeout time.Duration,
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Check engine light: %v, confirmed codes: %d\n", map[bool]string{true: "on", false: "off"}[on], n)
+			r := dtcReport{MIL: on, Confirmed: n}
 			for _, kind := range []struct {
-				name string
+				dst  *[]obd2.DTC
 				read func(context.Context) ([]obd2.DTC, error)
-			}{{"Stored", c.StoredDTCs}, {"Pending", c.PendingDTCs}, {"Permanent", c.PermanentDTCs}} {
+			}{{&r.Stored, c.StoredDTCs}, {&r.Pending, c.PendingDTCs}, {&r.Permanent, c.PermanentDTCs}} {
 				codes, err := kind.read(ctx)
-				switch {
-				case errors.Is(err, obd2.ErrNoResponse):
-					fmt.Printf("%-10s not supported\n", kind.name+":")
-				case err != nil:
+				if err != nil && !errors.Is(err, obd2.ErrNoResponse) {
 					return err
-				default:
-					fmt.Printf("%-10s %v\n", kind.name+":", codes)
 				}
+				*kind.dst = codes // nil when no ECU supports the service
 			}
-			return nil
+			return out.dtcs(r)
 		})
 	case "clear":
 		if len(args) != 1 || args[0] != "-yes" {
 			return errors.New("clearing also resets the readiness monitors; run 'obd2 clear -yes' to confirm")
 		}
-		return with(c.ClearDTCs)
+		return with(func(ctx context.Context) error {
+			if err := c.ClearDTCs(ctx); err != nil {
+				return err
+			}
+			return out.cleared()
+		})
 	case "vin":
 		return with(func(ctx context.Context) error {
 			vin, err := c.VIN(ctx)
-			if err == nil {
-				fmt.Println(vin)
+			if err != nil {
+				return err
 			}
-			return err
+			return out.vin(vin)
 		})
 	case "raw":
 		req, err := hex.DecodeString(strings.Join(args, ""))
 		if err != nil || len(req) == 0 {
-			return fmt.Errorf("raw needs a request in hex, such as 0902")
+			return errors.New("raw needs a request in hex, such as 0902")
 		}
 		return with(func(ctx context.Context) error {
 			rs, err := c.Request(ctx, req)
-			for _, r := range rs {
-				fmt.Printf("%-8X % X\n", r.ECU, r.Data)
+			if err != nil {
+				return err
 			}
-			return err
+			return out.responses(rs)
 		})
 	default:
 		return fmt.Errorf("unknown command %q; run obd2 -h", cmd)

@@ -22,6 +22,22 @@ func (d DTC) System() byte {
 	return "PCBU"[d>>14]
 }
 
+// MarshalText encodes the code as text, such as "P0301", so that JSON
+// shows it that way.
+func (d DTC) MarshalText() ([]byte, error) {
+	return []byte(d.String()), nil
+}
+
+// UnmarshalText parses a code such as "P0301".
+func (d *DTC) UnmarshalText(b []byte) error {
+	v, err := ParseDTC(string(b))
+	if err != nil {
+		return err
+	}
+	*d = v
+	return nil
+}
+
 // ParseDTC parses a five-character code such as "P0301" or "U0100".
 func ParseDTC(s string) (DTC, error) {
 	if len(s) != 5 {

@@ -123,6 +123,34 @@ client := obd2.NewClient(obd2.NewCANTransport(bus.Connect(), obd2.CANOptions{}))
 The simulator also runs on a Linux vcan interface, so programs that expect a
 real CAN device can be tested too.
 
+## Command-line tool
+
+```sh
+go install github.com/RyoheiHashimoto/obd2/cmd/obd2@latest
+
+obd2 -can can0 info                  # protocol and supported PIDs
+obd2 -can can0 read 0C 0D            # engine speed and vehicle speed
+obd2 -elm 192.168.0.10:35000 dtc     # trouble codes through a Wi-Fi ELM327
+obd2 -elm /dev/ttyUSB0 watch 0C      # engine speed, repeatedly
+```
+
+With `-json`, results come out as JSON for other programs to read; `watch`
+prints one object per line. For example, from Python:
+
+```python
+import json, subprocess
+
+out = subprocess.run(["obd2", "-can", "can0", "-json", "read", "0C", "0D"],
+                     capture_output=True, text=True, check=True).stdout
+for r in json.loads(out)["readings"]:
+    print(r["name"], r["value"], r["unit"])  # Engine speed 729 rpm
+```
+
+A reading looks like
+`{"ecu":"7E8","pid":"0C","name":"Engine speed","value":729,"unit":"rpm","raw":"0B64"}`;
+`value` is null for PIDs that are not a single number. On Linux,
+`obd2 -can vcan0 sim` runs a simulated engine ECU to try this without a car.
+
 ## Coverage
 
 | Service | Client method |
