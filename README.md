@@ -22,6 +22,11 @@ adapter.
 go get github.com/RyoheiHashimoto/obd2
 ```
 
+It needs Go 1.22 or newer. On macOS use Go 1.23 or newer: Go 1.22's linker
+leaves out the LC_UUID load command, and recent macOS versions refuse to
+start some binaries without it
+([golang/go#68678](https://github.com/golang/go/issues/68678)).
+
 ## Usage
 
 ### A CAN interface (Linux)

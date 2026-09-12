@@ -11,6 +11,13 @@ jobs:
       matrix:
         go: ["1.22", stable]
         os: [ubuntu-latest, macos-latest, windows-latest]
+        exclude:
+          # Go 1.22's linker leaves out the LC_UUID load command, and the
+          # macOS runners' dyld refuses to start some such binaries (here the
+          # test binary of cmd/obd2, which imports net). The fix reached Go
+          # 1.23 but not 1.22 (golang/go#68678, golang/go#69992).
+          - go: "1.22"
+            os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
