@@ -20,8 +20,8 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
-  # Runs the SocketCAN code against a real kernel CAN stack (vcan), and
-  # checks the ISO-TP implementation against the kernel's can-isotp module.
+  # Runs the SocketCAN code against the Linux kernel's CAN stack (vcan), and
+  # checks the ISO-TP implementation against an independent one.
   socketcan:
     runs-on: ubuntu-latest
     steps:
@@ -29,14 +29,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: Set up vcan0 and can-isotp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up vcan0
         run: |
           sudo apt-get update
           sudo apt-get install -y can-utils "linux-modules-extra-$(uname -r)"
           sudo modprobe vcan
-          sudo modprobe can-isotp
           sudo ip link add dev vcan0 type vcan
           sudo ip link set up vcan0
+          # The kernel's own ISO-TP is optional: the Azure kernels of the
+          # hosted runners do not ship it, and its cross-check is skipped.
+          sudo modprobe can-isotp || echo "::notice::can-isotp is not available on $(uname -r)"
+      - name: Install python-can and can-isotp for the cross-check
+        run: pip install -r socketcan/testdata/requirements.txt
       - run: go test -race -tags vcan -v ./socketcan/
 
   lint:
