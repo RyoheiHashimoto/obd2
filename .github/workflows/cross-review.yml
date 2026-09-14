@@ -1,0 +1,114 @@
+name: Cross review
+
+# PR ごとに、agy（Antigravity CLI。中のモデルは Gemini）が差分をレビューし、
+# Claude がその指摘を実際のコードで確かめて、結果を PR にコメントする。
+# ジョブが失敗するのは、レビューを実行できなかったときだけ（指摘があっても失敗にはしない）。
+#
+# 必要な Secret: GEMINI_API_KEY（Google AI Studio のキー）、CLAUDE_CODE_OAUTH_TOKEN（claude setup-token）
+# モデルを変えるときは、リポジトリの Variable CROSS_REVIEW_MODEL に agy のモデル名を入れる。
+# .github/cross-review/run.sh は ~/.claude/skills/cross-review/run.sh の写し。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: cross-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # fork からの PR には Secret が渡らないので対象外（メンテナが手元で /cross-review を実行する）
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # マージコミットと、その親（base 側）を取るため
+
+      - name: Install agy and Claude Code
+        run: |
+          curl -fsSL https://antigravity.google/cli/install.sh | bash
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p ~/.gemini/antigravity-cli
+          echo '{"modelProvider":"gemini"}' > ~/.gemini/antigravity-cli/settings.json
+          # curl | bash は、ダウンロードに失敗しても成功扱いで進むので、ここで入ったことを確かめる
+          test -x "$HOME/.local/bin/agy" && test -x "$HOME/.local/bin/claude" \
+            || { echo "::error::agy か Claude Code のインストールに失敗しました"; exit 1; }
+
+      - name: List the models the Gemini API key can use
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: agy models || true
+
+      - name: Review with agy
+        id: agy
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CROSS_REVIEW_MODEL: ${{ vars.CROSS_REVIEW_MODEL || 'gemini-3.1-pro-high' }}
+        run: |
+          # チェックアウトしたのは PR を base に重ねたマージコミットなので、親との差分が PR の変更になる。
+          # 出力を先に作業ツリーへ書くと未追跡ファイルとして数えられるので、一時ディレクトリに書いてから写す。
+          set +e
+          .github/cross-review/run.sh HEAD^1 HEAD > "$RUNNER_TEMP/agy-review.txt" 2>&1
+          cp "$RUNNER_TEMP/agy-review.txt" agy-review.txt
+          cat agy-review.txt
+          # 結果の行は1行目とは限らない（git の警告などが先に出ることがある）ので、探して判定する
+          result=$(grep -m 1 '^CROSS_REVIEW_' agy-review.txt)
+          case "$result" in
+            CROSS_REVIEW_OK*)    echo "result=ok" >> "$GITHUB_OUTPUT" ;;
+            CROSS_REVIEW_EMPTY*) echo "result=empty" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::agy のレビューを実行できませんでした: ${result:-結果の行がありません}"; exit 1 ;;
+          esac
+
+      - name: Verify with Claude
+        if: steps.agy.outputs.result == 'ok'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          claude -p "$(cat .github/cross-review/verify.md)" \
+            --allowedTools "Read,Grep,Glob" --max-turns 40 \
+            --output-format json < /dev/null > claude.json || true
+          python3 - <<'PY'
+          import json, sys
+          try:
+              d = json.load(open("claude.json"))
+          except Exception as e:
+              print(f"::error::Claude の出力を読めません: {e}")
+              sys.exit(1)
+          r = (d.get("result") or "").strip()
+          if d.get("is_error") or not r:
+              print(f"::error::Claude の確認に失敗しました: {d.get('subtype')} {r[:300]}")
+              sys.exit(1)
+          open("comment.md", "w").write(r + "\n")
+          PY
+
+      - name: Post the result to the PR
+        if: steps.agy.outputs.result == 'ok'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # 同じ PR には1つのコメントを上書きし続ける（目印は HTML コメント）
+          marker='<!-- cross-review -->'
+          {
+            echo "$marker"
+            echo "### クロスレビュー（agy → Claude）"
+            echo
+            cat comment.md
+            echo
+            echo "<sub>$(grep -m 1 '^CROSS_REVIEW_OK' agy-review.txt | sed 's/^CROSS_REVIEW_OK: //') / Cross review workflow による自動投稿</sub>"
+          } > body.md
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" | tail -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@body.md > /dev/null
+          else
+            gh pr comment "$PR" --body-file body.md
+          fi
